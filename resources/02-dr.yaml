@@ -1,0 +1,125 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: exam-master-dr
+  namespace: istio-system
+spec:
+  # ============================================================================
+  # 1. HOST & SCOPE (Mandatory & Core Fields)
+  # ============================================================================
+  # The K8s service name or FQDN in the Service Registry that this rule applies to.
+  host: api-service.default.svc.cluster.local
+  
+  # Export control: '.' = current namespace only, '*' = all namespaces.
+  exportTo:
+  - "."
+
+  # Optional workloadSelector: Apply this DR directly to pods with matching labels (e.g. sidecars)
+  # workloadSelector:
+  #   matchLabels:
+  #     app: api-service
+
+  # ============================================================================
+  # 2. GLOBAL TRAFFIC POLICY (Applies to ALL subsets unless overridden)
+  # ============================================================================
+  trafficPolicy:
+  # A- loadBalancer: How to distribute traffic across multiple endpoints of the same service.
+  # B- connectionPool: (Circuit Breaker to protect the backend from being overwhelmed) How to manage connections to the service (active limits, timeouts, etc.) (http and/or tcp settings)
+  # C- outlierDetection: How to eject unhealthy endpoints from the load balancing pool (circuit breaking).
+  # D- tls : How to configure client-side TLS when talking to the service (mTLS, SIMPLE, MUTUAL, DISABLE).
+
+    # --- A. LOAD BALANCING ALGORITHMS ---
+    loadBalancer:
+      # Options for 'simple': ROUND_ROBIN , LEAST_REQUEST (default), RANDOM, PASSTHROUGH (Uses the original destination IP)
+      simple: LEAST_REQUEST
+      
+      # Alternative: Consistent Hash Load Balancing (Sticky Sessions)
+      # Note: Use EITHER 'simple' OR 'consistentHash', never both!
+      # consistentHash:
+      #   httpHeaderName: "X-User-ID"   # Route requests with same header to same pod
+      #   # httpCookie:
+      #   #   name: "user-session"
+      #   #   ttl: 3600s
+      #   # useSourceIp: true
+
+    # --- B. CONNECTION POOLING (Active Circuit Breaker / Volume Limits) ---
+    # PROTECTS BACKEND: Prevents crash by limiting total concurrent traffic.
+    connectionPool:
+    # B.1. tcp: Settings common to both HTTP and TCP upstream connections.
+    # B.2. http: Settings specific to HTTP upstream connections (HTTP/1.1 or HTTP/2).
+    #--- B.1. TCP Connection Pool Settings for HTTP/TCP upstream connections ---
+      tcp:
+        maxConnections: 100            # Limit: Total concurrent TCP/HTTP1 connections
+        connectTimeout: 30ms           # Limit: TCP handshake timeout
+        tcpKeepalive:
+          time: 7200s
+          interval: 75s # TCP keepalive interval, what does that mean? It means that if the connection is idle for 7200 seconds (2 hours),
+                        # the client will send a keepalive probe every 75 seconds to check if the connection is still alive.
+                        # If the server does not respond to these probes, the connection will be considered dead and will be closed.
+                        # This helps to prevent stale connections from lingering indefinitely and consuming resources on both the client and server sides.
+    # -- B.2. HTTP Connection Pool Settings ---
+      http:
+        http1MaxPendingRequests: 50    # Limit: Max requests waiting for a connection
+        http2MaxRequests: 1000         # Limit: Max active HTTP/2 requests
+        maxRequestsPerConnection: 10   # Limit: Max requests before rotating connection
+        maxRetries: 3                  # Limit: Total outstanding retries allowed
+
+    # --- C. OUTLIER DETECTION (Passive Circuit Breaker / Health Ejection) ---
+    # PROTECTS CLIENTS: Ejects "bad" pods from the LB pool based on performance.
+    # EXAM HIGH-YIELD: This is what most people mean by "Circuit Breaking" in Istio!
+    outlierDetection:
+      consecutive5xxErrors: 3          # Error: Eject if pod returns 3 x 5xx in a row
+      consecutiveGatewayErrors: 3      # Error: Eject if pod returns 3 x 502/503/504
+      interval: 10s                    # Check: Frequency of health sweep
+      baseEjectionTime: 30s            # Penalty: Minimum time pod is banned (e.g. 30s, 1m)
+      maxEjectionPercent: 50           # Safety: Max % of pods we are allowed to eject (don't eject 100%!)
+      splitExternalLocalOriginErrors: true
+
+    # --- D. UPSTREAM TLS SETTINGS (Client-Side TLS) ---
+    # Determines how Envoy talks TO the destination workload.
+    tls:
+      mode: ISTIO_MUTUAL               # Options: DISABLE, SIMPLE, MUTUAL, ISTIO_MUTUAL
+      # ISTIO_MUTUAL = Standard Istio auto-mTLS using Citadel/Istiod certs.
+      # SIMPLE       = Standard TLS (Client validates Server cert). Requires 'caCertificates'.
+      # MUTUAL       = Mutual TLS using external certs. Requires 'clientCertificate' & 'privateKey'.
+      # DISABLE      = Plain text (unencrypted).
+
+    # --- E. PORT LEVEL SETTINGS (Per-Port Policy Overrides) ---
+    portLevelSettings:
+    - port:
+        number: 8080
+      loadBalancer:
+        simple: ROUND_ROBIN
+      tls:
+        mode: DISABLE                  # Override global mTLS for legacy port 8080
+
+  # ============================================================================
+  # 3. SUBSETS (Version Definitions for Canary & Traffic Shifting)
+  # ============================================================================
+  # Defines logical groupings of endpoints based on pod labels.
+  # VirtualServices target these subset names (e.g., subset: v1).
+  subsets:
+  
+  # --- SUBSET 1: Version 1 (Stable) ---
+  - name: v1
+    labels:
+      version: v1                   # Matches pods with label 'version: v1'
+    # Optional: Override trafficPolicy specifically for v1
+    trafficPolicy: # Traffic policy at sebset level overrides the global traffic policy above.
+      loadBalancer:
+        simple: ROUND_ROBIN
+
+  # --- SUBSET 2: Version 2 (Canary) ---
+  - name: v2
+    labels:
+      version: v2                   # Matches pods with label 'version: v2'
+    trafficPolicy:
+      # Example: Stricter circuit breaking on the experimental v2 canary
+      outlierDetection:
+        consecutive5xxErrors: 1
+        baseEjectionTime: 1m
+
+  # --- SUBSET 3: Read-Only Replica Pool ---
+  - name: readonly
+    labels:
+      role: readonly

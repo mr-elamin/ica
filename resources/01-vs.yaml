@@ -1,0 +1,211 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: exam-master-vs
+  namespace: istio-system
+spec:
+  # 1. SCOPE: Where does this rule live?
+  hosts:
+  - "api.example.com"             # The public DNS name
+  - "api-internal.default.svc.cluster.local" # The internal K8s service name
+  
+  # 2. BINDING: Which proxies apply this?
+  gateways:
+  - my-ingress-gateway            # Apply to external Ingress traffic
+  - mesh                          # "mesh" is a reserved keyword for ALL internal sidecars
+  
+  # 3. EXPOSURE: Who can see this config?
+  exportTo:
+  - "."                           # "." means only this namespace. "*" means all namespaces.
+  
+  # ============================================================================
+  # CRITICAL EXAM RULES FOR 'http:':
+  # 1. Rules are evaluated TOP TO BOTTOM (First matching rule wins!).
+  # 2. Most specific path/header rules MUST come FIRST.
+  # 3. EVERY rule item MUST have ONE action: 'route', 'redirect', or 'directResponse'.
+  # 4. Features like 'timeout', 'retries', 'fault', 'corsPolicy', 'mirror', 'rewrite'
+  #    are ATTACHED to a route rule — they are NOT standalone list items!
+  # 5. Always include a Default Catch-All Route at the VERY END.
+  # ============================================================================
+  http:
+
+  # --- RULE 1: Header-based Match (Canary/User Debugging) ---
+  - name: "debug-v2-traffic"
+    match:
+    - headers:
+        end-user:
+          exact: "jason"          # Only if HTTP header 'end-user' is 'jason'
+      uri:
+        prefix: "/api/v2"         # AND url starts with /api/v2
+      method:
+        exact: "GET"              # AND HTTP method is GET
+      gateways:
+      - my-ingress-gateway        # Match-level FILTER: only if coming from outside
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v2                # DR Subset mapping
+
+  # --- RULE 2: URL Rewrite (Path Masking) ---
+  - name: "internal-rewrite"
+    match:
+    - uri:
+        prefix: "/v1/service"
+    rewrite:                      # Client doesn't know; proxy changes URI on-the-fly
+      uri: "/internal/v1"
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+
+  # --- RULE 3: Redirection (HTTP 301/302) ---
+  - name: "legacy-redirect"
+    match:
+    - uri:
+        prefix: "/old-path"
+    redirect:                     # Return HTTP 301/302 to client (No 'route' needed!)
+      uri: "/new-path"
+      authority: "new-api.example.com"
+
+  # --- RULE 4: Mirroring / Traffic Shadowing ---
+  - name: "traffic-shadowing"
+    match:
+    - uri:
+        prefix: "/write-api"
+    mirror:                       # Asynchronously duplicates traffic to test service
+      host: api-tester.default.svc.cluster.local
+      subset: v1
+    mirrorPercentage:
+      value: 100.0                # Mirror 100% of matching traffic
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+
+  # --- RULE 5: Fault Injection (Resilience Testing) ---
+  - name: "chaos-test"
+    match:
+    - uri:
+        exact: "/slow-endpoint"
+    fault:
+      delay:
+        percentage:
+          value: 50.0             # Inject delay for 50% of requests
+        fixedDelay: 5s            # Add 5 seconds of latency
+      abort:
+        percentage:
+          value: 10.0             # Force fail 10% of requests
+        httpStatus: 503           # Return 503 Service Unavailable
+        grpcStatus: 14              # Return gRPC UNAVAILABLE (14), other choices: PERMISSION_DENIED (7), or UNAUTHENTICATED (16)
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+
+  # --- RULE 6: Traffic Shifting (Canary Rollout) ---
+  - name: "canary-rollout"
+    match:
+    - uri:
+        prefix: "/api"
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+      weight: 90                  # 90% of traffic here
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v2
+      weight: 10                  # 10% of traffic here
+  
+  # --- RULE 7: Header Manipulation (Add/Remove/Rewrite Headers) ---
+  - name: "headers-manipulation"
+    match:
+    - uri:
+        prefix: "/api"
+    route:
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+      headers:
+        request:
+          add:
+            subset: "v1"  # Add a custom header to requests
+          remove:
+            - x-remove-this-header
+          set:
+            x-rewrite-header: "new-value" # Rewrite an existing header
+        response:
+          add:
+            x-response-header: "response-value"
+
+  # --- RULE 8: DEFAULT CATCH-ALL ROUTE (Fallback for all remaining traffic) ---
+  - name: "default-fallback"
+    # No 'match' block = Matches 100% of remaining traffic (e.g. '/', '/health', etc.)
+    
+    timeout: 3s                   # Max total timeout for request
+    
+    retries:                      # Retry policy
+      attempts: 3
+      perTryTimeout: 1s
+      retryOn: "gateway-error,connect-failure,5xx"
+
+    corsPolicy:                   # Cross-Origin Resource Sharing policy
+      allowOrigins:
+      - exact: "https://frontend.com"
+      allowMethods:
+      - POST
+      - GET
+      allowHeaders:
+      - X-Custom-Header
+      maxAge: "24h"
+      allowCredentials: true
+
+    route:                        # The mandatory destination
+    - destination:
+        host: api-service.default.svc.cluster.local
+        subset: v1
+
+  # ============================================================================
+  # SECTION 2: TLS ROUTING (spec.tls)
+  # Used for Passthrough/Non-Terminated TLS traffic (SNI-based routing).
+  # EXAM NOTE: Cannot use the same rule item as 'http' or 'tcp'.
+  # ============================================================================
+  tls:
+  # --- RULE 1: SNI-Based Routing (PASSTHROUGH) ---
+  - match:
+    - sniHosts:                   # REQUIRED field for tls matching!
+      - "secure.example.com"
+      port: 443                   # Optional target port filter
+      gateways:
+      - my-ingress-gateway
+      sourceNamespace: "default"  # Optional source client filter
+    route:
+    - destination:
+        host: secure-service.default.svc.cluster.local
+        port:
+          number: 443             # Recommended to specify target port
+
+  # --- RULE 2: Wildcard SNI Match ---
+  - match:
+    - sniHosts:
+      - "*.internal.net"
+    route:
+    - destination:
+        host: internal-gateway.default.svc.cluster.local
+        port:
+          number: 8443
+
+  # ============================================================================
+  # SECTION 3: TCP ROUTING (spec.tcp)
+  # Used for raw Layer 4 TCP traffic (e.g. Databases like MySQL, Redis, Postgres).
+  # EXAM NOTE: Does NOT support HTTP features like headers, paths, or retries.
+  # ============================================================================
+  tcp:
+  - match:
+    - port: 3306                  # Match MySQL traffic on port 3306
+    route:
+    - destination:
+        host: mysql-primary.db.svc.cluster.local
+        port:
+          number: 3306
+      weight: 100

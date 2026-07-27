@@ -1,0 +1,161 @@
+# ==============================================================================
+# ISTIO SERVICEENTRY (SE) MASTER REFERENCE FOR ICA EXAM
+# File: istio/resources/03-se.yaml
+#
+# PURPOSE:
+# Adds external services (e.g., legacy APIs, external DBs) or non-K8s VM services
+# into Istio's internal service registry so Envoy proxies know how to route,
+# apply mTLS, and collect metrics for them.
+# ==============================================================================
+# Istio’s outbound traffic policy mode setting (outboundTrafficPolicy.mode) is set to ALLOW_ANY by default.
+# This tells sidecars they can reach any services not part of Istio’s service registry and running outside of the mesh.
+# If you have configured your mesh with REGISTRY_ONLY, then you must create a ServiceEntry for any external service you want to reach.
+# ==============================================================================
+# Important examples in here: [External Services — ServiceEntry](../06.east-west-traffic.md/#15-external-services--serviceentry)
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: external-service-master-ref
+  namespace: default
+spec:
+  # ----------------------------------------------------------------------------
+  # 1. HOSTS (Required)
+  # FQDNs or wildcards associated with the ServiceEntry.
+  # - For HTTP/HTTPS: Matched against Host/Authority header or SNI.
+  # - For TCP: Matched against VIPs in 'addresses' or destination port.
+  # ----------------------------------------------------------------------------
+  hosts:
+    - "api.external-db.com"
+    - "*.external-partner.com"  # Wildcards supported for HTTP/HTTPS
+
+  # ----------------------------------------------------------------------------
+  # 2. ADDRESSES (Optional)
+  # Virtual IP (VIP) addresses assigned to this service inside the mesh.
+  # REQUIRED for non-HTTP/TCP traffic if Resolution is NONE or STATIC, or if
+  # multiple services share the same port (e.g., port 443 TCP passthrough).
+  # CIDR blocks supported (e.g., "192.168.1.0/24").
+  # ----------------------------------------------------------------------------
+  addresses:
+    - 240.240.0.1/32             # Synthetic VIP or real external IP
+
+  # ----------------------------------------------------------------------------
+  # 3. PORTS (Required)
+  # Ports exposed by the external service.
+  # Protocol prefix in 'name' or explicit 'protocol' field determines traffic parsing:
+  # Supported protocols: HTTP, HTTPS, GRPC, HTTP2, MONGO, REDIS, MYSQL, TCP, UDP
+  # ----------------------------------------------------------------------------
+  ports:
+    - name: https-port
+      number: 443
+      protocol: HTTPS            # Parsed as HTTPS / TLS
+      targetPort: 8443           # Optional: backend endpoint port if different
+    - name: http-api
+      number: 80
+      protocol: HTTP             # Parsed as HTTP/1.1
+    - name: mysql-db
+      number: 3306
+      protocol: TCP              # Opaque TCP stream
+
+  # ----------------------------------------------------------------------------
+  # 4. LOCATION (Required / Recommended)
+  # Enum: MESH_EXTERNAL | MESH_INTERNAL
+  # - MESH_EXTERNAL: Service is OUTSIDE the mesh (e.g., AWS RDS, third-party SaaS API).
+  #                  Sidecar acts as an outbound client proxy.
+  # - MESH_INTERNAL: Service is PART OF the mesh (e.g., legacy VMs with sidecars attached).
+  #                  Enables mTLS and internal mesh features across K8s + VMs.
+  # ----------------------------------------------------------------------------
+  location: MESH_EXTERNAL
+
+  # ----------------------------------------------------------------------------
+  # 5. RESOLUTION (Required / Recommended)
+  # Enum: NONE | STATIC | DNS | DNS_ROUND_ROBIN | DYNAMIC_DNS
+  # Determines how Envoy resolves IP addresses for the target service:
+  #
+  #  a) NONE: Envoy routes directly to the original IP requested by client.
+  #     - Used for: IP-based routing, transparent proxying, DBs with direct IPs.
+  #
+  #  b) STATIC: Envoy routes to endpoints explicitly defined in 'endpoints' list
+  #     or matched via WorkloadEntry.
+  #     - Used for: Fixed external IPs, static legacy servers.
+  #
+  #  c) DNS: Envoy asynchronously resolves domain name in 'hosts' field via DNS.
+  #     - Used for: Domain-based SaaS endpoints (e.g., api.stripe.com).
+  #
+  #  d) DNS_ROUND_ROBIN: Resolves DNS and round-robins across all returned IPs.
+  #  e) DYNAMIC_DNS: Dynamically queries DNS per request (rarely used in ICA).
+  # ----------------------------------------------------------------------------
+  resolution: DNS
+
+  # ----------------------------------------------------------------------------
+  # 6. ENDPOINTS (Used when resolution: STATIC or DNS)
+  # Mutually exclusive with workloadSelector in most practical patterns.
+  # Defines hardcoded endpoints when resolution is STATIC or explicit overrides.
+  # ----------------------------------------------------------------------------
+  endpoints:
+    - address: 192.168.10.50
+      ports:
+        https-port: 8443
+      labels:
+        environment: prod
+        region: us-east-1
+      locality: us-east-1a
+      weight: 80                 # Load balancing weight for this endpoint
+      serviceAccount: "external-sa"
+    - address: 192.168.10.51
+      ports:
+        https-port: 8443
+      weight: 20
+
+  # ----------------------------------------------------------------------------
+  # 7. WORKLOAD SELECTOR (Used when location: MESH_INTERNAL & resolution: STATIC)
+  # Dynamically selects WorkloadEntry resources running in the mesh (e.g., VMs).
+  # NOTE: Do NOT use inline 'endpoints' AND 'workloadSelector' together!
+  # Uncomment below when mapping VMs managed via WorkloadEntry:
+  # ----------------------------------------------------------------------------
+  # workloadSelector:
+  #   labels:
+  #     app: legacy-vm-app
+
+  # ----------------------------------------------------------------------------
+  # 8. EXPORT TO (Optional)
+  # Controls visibility of this ServiceEntry across namespaces.
+  # - "." : Current namespace only
+  # - "*" : All namespaces (default)
+  # - "istio-system" : Specific target namespace
+  # ----------------------------------------------------------------------------
+  exportTo:
+    - "."
+
+  # ----------------------------------------------------------------------------
+  # 9. SUBJECT ALT NAMES (SANs) (Optional)
+  # For TLS/mTLS verification. Verifies server certificate SAN matching.
+  # ----------------------------------------------------------------------------
+  subjectAltNames:
+    - "api.external-db.com"
+
+# ==============================================================================
+# COMMON SCENARIOS FOR THE ICA EXAM
+# ==============================================================================
+#
+# SCENARIO A: External HTTPS SaaS API (e.g. api.github.com)
+#   location: MESH_EXTERNAL
+#   resolution: DNS
+#   hosts: ["api.github.com"]
+#   ports: [{name: https, number: 443, protocol: HTTPS}]
+#
+# SCENARIO B: External Database with Static IP
+#   location: MESH_EXTERNAL
+#   resolution: STATIC
+#   hosts: ["postgres.internal.net"]
+#   ports: [{name: mysql, number: 5432, protocol: TCP}]
+#   endpoints: [{address: 10.0.1.100}]
+#
+# SCENARIO C: On-Premises Bare Metal / VM inside Mesh
+#   location: MESH_INTERNAL
+#   resolution: STATIC
+#   hosts: ["payment-service.global"]
+#   ports: [{name: http, number: 8080, protocol: HTTP}]
+#   workloadSelector:
+#     labels:
+#       app: payment-vm
+# ==============================================================================
