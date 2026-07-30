@@ -8,6 +8,7 @@ spec:
   # 1. HOST & SCOPE (Mandatory & Core Fields)
   # ============================================================================
   # The K8s service name or FQDN in the Service Registry that this rule applies to.
+  # If the DestinationRule targets my-service.default.svc.cluster.local, it will apply to all traffic going to that service, no matter where the client is (unless restricted by exportTo).
   host: api-service.default.svc.cluster.local
   
   # Export control: '.' = current namespace only, '*' = all namespaces.

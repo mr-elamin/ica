@@ -1,0 +1,71 @@
+# Istio Security Mastery (ICA Exam Reference)
+# 1. PeerAuthentication: How we encrypt the "Pipe" (mTLS)
+# 2. AuthorizationPolicy: Who is allowed inside the "Pipe" (RBAC)
+
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system # Global Mesh-wide Policy
+spec:
+  mtls:
+    # STRICT: Only mTLS allowed. Plaintext rejected.
+    # PERMISSIVE: Both mTLS and Plaintext allowed (Migration mode).
+    # DISABLE: Plaintext only.
+    mode: STRICT
+
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: namespace-policy
+  namespace: prod # Namespace-level override
+spec:
+  mtls:
+    mode: PERMISSIVE # Allow legacy apps in this NS to talk to mesh apps
+
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-nothing
+  namespace: prod 
+spec:
+  # BEST PRACTICE: Start with a "Deny All" or an empty "ALLOW" (which denies all)
+  # This selector {} matches ALL pods in the namespace
+  selector: {}
+  action: ALLOW
+  rules: [] # Empty rules = matches nothing = Deny Everything else
+
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        # Identity is based on SPIFFE ID (ServiceAccount)
+        principals: ["cluster.local/ns/prod/sa/frontend-sa"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/api/v1/*"]
+    when:
+    - key: request.auth.claims[iss]
+      values: ["https://accounts.google.com"] # Optional: Layer in JWT check
+
+---
+# PRO TIP FOR EXAM:
+# - PeerAuthentication = Layer 4 (Transport/TLS)
+# - AuthorizationPolicy = Layer 7 (Identity/HTTP/RBAC)
+# - If you have STRICT mTLS but no AuthPolicy, everyone in the mesh can talk.
+# - If you have an AuthPolicy but DISABLE mTLS, the "principals" check will FAIL 
+#   because without mTLS, Istio doesn't know the caller's identity!

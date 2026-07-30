@@ -5,6 +5,7 @@ metadata:
   namespace: istio-system
 spec:
   # 1. SCOPE: Where does this rule live?
+  # if the VirtualService targets my-service.default.svc.cluster.local, it will apply to all traffic going to that service, no matter where the client is (unless restricted by gateways or exportTo).
   hosts:
   - "api.example.com"             # The public DNS name
   - "api-internal.default.svc.cluster.local" # The internal K8s service name

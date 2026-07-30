@@ -1,0 +1,247 @@
+# ==============================================================================
+# ISTIO MASTERY: Gateway Reference Guide (ICA Exam Ready)
+# API Group: networking.istio.io/v1
+# Kind: Gateway
+# ==============================================================================
+#
+# KEY CONCEPT:
+# A Gateway resource configures the edge proxy (Ingress/Egress Gateway) that
+# listens for traffic entering or leaving the mesh.
+#
+# IMPORTANT MENTAL MODEL:
+# - Gateway = the EDGE LISTENER / ENTRY POINT
+# - VirtualService = the ROUTING RULES applied AFTER the gateway accepts traffic
+# - Service = the actual backend service behind the gateway
+#
+# EXAM GOTCHAS:
+# 1. spec.selector selects the actual gateway pods that will receive this config.
+# 2. spec.servers is a list, and each server has its own port + TLS behavior.
+# 3. hosts are the SNI/Host names exposed by this gateway.
+# 4. TLS mode determines whether Istio terminates TLS or passes it through.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# SECTION 1: BASIC INGRESS GATEWAY (HTTP LISTENER)
+# Use Case: Expose an HTTP service at the edge.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: basic-ingress
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway        # This selects the actual ingress gateway pods
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 2: HTTPS TERMINATION AT THE GATEWAY (SIMPLE TLS)
+# Use Case: Gateway terminates TLS and forwards plain HTTP to the backend.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: tls-terminate-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - "api.example.com"
+    tls:
+      mode: SIMPLE
+      serverCertificate: /etc/istio/ingressgateway-certs/tls.crt
+      privateKey: /etc/istio/ingressgateway-certs/tls.key
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 3: MUTUAL TLS (mTLS) AT THE EDGE
+# Use Case: Client must present a certificate to the gateway.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: mtls-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 8443
+      name: mtls
+      protocol: HTTPS
+    hosts:
+    - "secure.example.com"
+    tls:
+      mode: MUTUAL
+      serverCertificate: /etc/istio/ingressgateway-certs/tls.crt
+      privateKey: /etc/istio/ingressgateway-certs/tls.key
+      caCertificates: /etc/istio/ingressgateway-certs/ca.crt
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 4: TLS PASSTHROUGH (GATEWAY DOES NOT TERMINATE TLS)
+# Use Case: The gateway simply forwards encrypted traffic to the backend.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: tls-passthrough-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: tls-passthrough
+      protocol: TLS
+    hosts:
+    - "*.example.com"
+    tls:
+      mode: PASSTHROUGH
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 5: AUTO_PASSTHROUGH (EAST-WEST GATEWAY / MULTI-CLUSTER)
+# Use Case: Cross-cluster mTLS traffic uses SNI-based routing without decrypting.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: eastwest-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: eastwestgateway
+  servers:
+  - port:
+      number: 15443
+      name: tls
+      protocol: TLS
+    hosts:
+    - "*"
+    tls:
+      mode: AUTO_PASSTHROUGH
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 6: HTTPS REDIRECT (HTTP -> HTTPS)
+# Use Case: Force clients to use HTTPS.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: redirect-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "example.com"
+    tls:
+      httpsRedirect: true
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 7: MULTI-SERVER GATEWAY (HTTP + HTTPS + TLS)
+# Use Case: One gateway pod listens on multiple ports.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: multi-server-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "example.com"
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - "example.com"
+    tls:
+      mode: SIMPLE
+      serverCertificate: /etc/istio/ingressgateway-certs/tls.crt
+      privateKey: /etc/istio/ingressgateway-certs/tls.key
+  - port:
+      number: 9443
+      name: mtls
+      protocol: HTTPS
+    hosts:
+    - "secure.example.com"
+    tls:
+      mode: MUTUAL
+      serverCertificate: /etc/istio/ingressgateway-certs/tls.crt
+      privateKey: /etc/istio/ingressgateway-certs/tls.key
+      caCertificates: /etc/istio/ingressgateway-certs/ca.crt
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 8: USING A SECRET FOR TLS CERTS (credentialName)
+# Use Case: Kubernetes Secret stores the certs instead of file paths.
+# ------------------------------------------------------------------------------
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: secret-based-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https-secret
+      protocol: HTTPS
+    hosts:
+    - "secure.example.com"
+    tls:
+      mode: SIMPLE
+      credentialName: my-tls-secret
+
+---
+# ==============================================================================
+# ICA EXAM QUICK REFERENCE SUMMARY / CHEAT SHEET
+# ==============================================================================
+# 1. Gateway = Edge listener / ingress-egress entry point.
+# 2. selector chooses which gateway pods receive the config.
+# 3. servers is a list of listeners.
+# 4. port.number + port.protocol + port.name define the listener.
+# 5. hosts determine what hostnames this listener serves.
+# 6. TLS modes:
+#    - SIMPLE: Istio terminates TLS.
+#    - MUTUAL: Istio terminates TLS and requires client certs.
+#    - PASSTHROUGH: Gateway does not terminate TLS.
+#    - AUTO_PASSTHROUGH: Used for east-west / multi-cluster SNI routing.
+#    - ISTIO_MUTUAL: Uses Istio-generated mTLS between gateway and internal services.
+# 7. httpsRedirect = redirect HTTP to HTTPS.
+# 8. A gateway by itself does not route traffic; it accepts traffic and hands it to
+#    a VirtualService for path/host-based routing.
+# ==============================================================================

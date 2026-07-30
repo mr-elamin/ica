@@ -24,6 +24,7 @@ spec:
   # - For HTTP/HTTPS: Matched against Host/Authority header or SNI.
   # - For TCP: Matched against VIPs in 'addresses' or destination port.
   # ----------------------------------------------------------------------------
+  # If the ServiceEntry adds api.external-db.com to hosts, it registers this host into Istio's internal service registry for all clients in the mesh, no matter where the client is (unless restricted by exportTo).
   hosts:
     - "api.external-db.com"
     - "*.external-partner.com"  # Wildcards supported for HTTP/HTTPS

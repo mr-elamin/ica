@@ -1,0 +1,131 @@
+# ==============================================================================
+# ISTIO MASTERY: PeerAuthentication Reference Guide (ICA Exam Ready)
+# API Group: security.istio.io/v1
+# Kind: PeerAuthentication
+# ==============================================================================
+#
+# KEY CONCEPT:
+# PeerAuthentication controls Layer 4 (Transport Layer) mTLS ENCRYPTION between 
+# sidecars/workloads. It decides whether incoming TCP connections MUST be encrypted,
+# CAN be encrypted, or MUST be plaintext.
+#
+# EXAM PRECEDENCE / INHERITANCE RULE (ABCD Rule):
+# Port-Level > Workload-Level > Namespace-Level > Mesh-Level > Default (PERMISSIVE)
+# 
+# MODES EXPLAINED:
+# - STRICT: Rejects plaintext. Only mTLS traffic is accepted.
+# - PERMISSIVE: Accepts BOTH mTLS and plaintext traffic (Default mesh state, migration mode).
+# - DISABLE: Forces plaintext. mTLS is turned off.
+# - UNSET: Inherits mode from parent scope (Workload -> NS -> Mesh).
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# SECTION 1: MESH-WIDE POLICY (Global Default)
+# Target: EVERY workload in the ENTIRE mesh across ALL namespaces.
+# Rule: Name MUST be 'default' AND namespace MUST be 'istio-system'.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default                 # MUST be named "default" for global/ns-wide scope
+  namespace: istio-system       # MUST be in root namespace "istio-system"
+spec:
+  # NOTE: Missing 'selector' OR 'selector: {}' both mean "apply to ALL workloads in scope".
+  mtls:
+    mode: STRICT                # Enforces STRICT mTLS across the entire cluster
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 2: NAMESPACE-WIDE POLICY (Namespace Default)
+# Target: EVERY workload inside a specific namespace ('prod').
+# Rule: Name MUST be 'default' AND placed in the target namespace.
+# Precedence: Overrides the Mesh-wide policy for workloads in 'prod'.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default                 # Convention/Requirement for NS-wide scope
+  namespace: prod              # Applies to all pods in 'prod' namespace
+spec:
+  mtls:
+    mode: PERMISSIVE            # Overrides Mesh STRICT -> allows plaintext for onboarding legacy apps
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 3: WORKLOAD-SPECIFIC POLICY (Targeted Selector)
+# Target: ONLY pods in namespace 'prod' matching label 'app: payment-service'.
+# Precedence: Overrides Namespace and Mesh policies for matching pods.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: payment-strict-policy   # Can be ANY descriptive name when 'selector' is specified
+  namespace: prod
+spec:
+  selector:
+    matchLabels:                # Map[string]string: Targets pods with label app=payment-service
+      app: payment-service
+  mtls:
+    mode: STRICT                # Force STRICT mTLS specifically for 'payment-service' pods
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 4: PORT-LEVEL OVERRIDE (Container Port Exceptions)
+# Target: Pods matching 'app: analytics-db', with a specific port exception.
+# Use Case: Metrics scraping, health probes, or legacy non-mTLS drivers on one port.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: analytics-port-exception
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: analytics-db
+  mtls:
+    mode: STRICT                # Default mode for ALL ports on this workload
+  portLevelMtls:
+    # ⚠️ CRITICAL ICA EXAM GOTCHA:
+    # The key (e.g. 9090) is the WORKLOAD/CONTAINER PORT (containerPort),
+    # NOT the Kubernetes Service port (port)!
+    # Example: If Service maps 80 -> 9090 (targetPort), you MUST specify 9090 here!
+    9090:
+      mode: DISABLE             # Port 9090 allows PLAINTEXT (e.g., Prometheus scraper)
+    8080:
+      mode: PERMISSIVE          # Port 8080 accepts both plaintext and mTLS
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 5: UNSET / INHERITANCE DEMO
+# Demonstrates explicit reset/fallback to parent scope.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: reset-to-parent
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: frontend
+  mtls:
+    mode: UNSET                 # UNSET = "I have no opinion, defer/inherit from parent scope", if no parent, defaults to PERMISSIVE.
+
+---
+# ==============================================================================
+# ICA EXAM QUICK REFERENCE SUMMARY / CHEAT SHEET
+# ==============================================================================
+# 1. Does PeerAuthentication enforce WHO can call the app?
+#    NO! PeerAuthentication ONLY enforces encrypted pipe (mTLS L4).
+#    AuthorizationPolicy enforces identity and RBAC rules (WHO / L7).
+#
+# 2. What happens if mTLS is STRICT in PeerAuthentication, but client sends plaintext?
+#    Envoy terminates the TCP connection immediately with a reset/connection drop.
+#
+# 3. Port Matching Rule:
+#    spec.portLevelMtls uses containerPort (targetPort in K8s Service definition).
+#
+# 4. Scope Resolution Hierarchy:
+#    [Port-Level Policy] -> [Workload Selector] -> [Namespace Default] -> [Mesh Root Default]
+# ==============================================================================

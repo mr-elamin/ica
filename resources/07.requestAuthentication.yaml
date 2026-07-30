@@ -1,0 +1,202 @@
+# ==============================================================================
+# ISTIO MASTERY: RequestAuthentication Reference Guide (ICA Exam Ready)
+# API Group: security.istio.io/v1
+# Kind: RequestAuthentication
+# ==============================================================================
+#
+# KEY CONCEPT:
+# RequestAuthentication validates End-User / Application identities using JWTs
+# (JSON Web Tokens) at Layer 7 (HTTP). It checks the token's cryptographic 
+# signature against public keys (JWKS) issued by an Identity Provider (IdP).
+#
+# ⚠️ CRITICAL ICA EXAM GOTCHA:
+# RequestAuthentication ONLY VALIDATES tokens if they are present!
+# It DOES NOT REJECT requests that carry NO token (anonymous traffic)!
+# To REJECT requests without a JWT, you MUST pair this resource with an 
+# AuthorizationPolicy that checks for 'requestPrincipals: ["*"]'.
+#
+# TARGETING MECHANISMS:
+# 1. spec.selector.matchLabels: Standard Pod label selector.
+# 2. spec.targetRef / targetRefs: Gateway API style resource targeting (Gateway/Service).
+# 3. No selector/targetRef: Applies to ALL workloads in the namespace (or mesh-wide if in istio-system).
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# SECTION 1: STANDARD POD SELECTOR & REMOTE JWKS
+# Target: Pods matching 'app: backend-api' in 'prod' namespace.
+# Use Case: Standard OAuth2/OIDC integration (Keycloak, Auth0, Google, Okta).
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-keycloak-auth
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: backend-api          # Pod selector
+  jwtRules:
+  - issuer: "https://sso.company.com/realms/production" # MUST match 'iss' claim in JWT
+    jwksUri: "https://sso.company.com/realms/production/protocol/openid-connect/certs" 
+                                # Public Key Set URL used by Envoy to verify signature
+    audiences:
+    - "api.company.com"         # Optional: MUST match 'aud' claim in JWT
+    - "mobile-app"
+    
+    forwardOriginalToken: true  # Keeps 'Authorization: Bearer <token>' header when forwarding upstream
+    
+    # Copy specific JWT claims into HTTP headers for the backend application
+    outputClaimToHeaders:
+    - header: "x-user-id"       # Target HTTP Header name
+      claim: "sub"              # Source JWT Claim name (e.g., subject user ID)
+    - header: "x-user-email"
+      claim: "email"
+      
+    # Output entire decoded JSON payload into a single custom header
+    outputPayloadToHeader: "x-jwt-payload"
+    
+    # Treat specified claims as space-delimited lists (e.g. OIDC 'scope' claim: "read write admin")
+    spaceDelimitedClaims:
+    - "scope"
+    
+    # Maximum time Envoy waits to fetch remote JWKS (PILOT_JWT_ENABLE_REMOTE_JWKS)
+    timeout: "5s"
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 2: CUSTOM TOKEN LOCATIONS & AIR-GAPPED INLINE JWKS
+# Target: Workloads where tokens arrive in custom headers/params/cookies or offline.
+# Istio supports extracting JWTs by default from the 'Authorization: Bearer <token>' header, but you can also specify custom locations.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-custom-locations
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: legacy-portal
+  jwtRules:
+  - issuer: "https://auth.internal.local"
+    # OPTION A: Inline JWKS for air-gapped clusters or offline key verification (no network call needed)
+    jwks: |
+      {"keys":[{"kty":"RSA","alg":"RS256","use":"sig","kid":"key-1","n":"...","e":"AQAB"}]}
+      
+    # Where to extract the JWT from the HTTP request:
+    fromHeaders:
+    - name: "x-jwt-token"       # Look in header 'x-jwt-token'
+      prefix: "Bearer "         # Optional prefix (Note the trailing space!)
+    - name: "custom-auth"
+    
+    fromParams:
+    - "access_token"            # Look in query parameter: GET /api?access_token=<JWT>
+    - "jwt"
+    
+    fromCookies:
+    - "SESSION_JWT"             # Look in HTTP Cookie named 'SESSION_JWT'
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 3: GATEWAY API TARGETING (targetRef & targetRefs)
+# Target: Ingress Gateways or Kubernetes Services using Gateway API syntax.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-gateway-api
+  namespace: istio-system
+spec:
+  # Single target reference (e.g. targeting an Ingress Gateway)
+  targetRef:
+    group: "gateway.networking.k8s.io" # Group of target resource
+    kind: "Gateway"                    # Kind of target (Gateway, Service, etc.)
+    name: "external-gateway"           # Name of target resource
+    namespace: "istio-system"          # Namespace of referent
+    
+  jwtRules:
+  - issuer: "https://accounts.google.com"
+    jwksUri: "https://www.googleapis.com/oauth2/v3/certs"
+
+---
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-multi-targetrefs
+  namespace: prod
+spec:
+  # Multiple target references
+  targetRefs:
+  - group: ""
+    kind: "Service"
+    name: "frontend-svc"
+  - group: ""
+    kind: "Service"
+    name: "api-svc"
+  jwtRules:
+  - issuer: "https://auth0.com/"
+    jwksUri: "https://auth0.com/.well-known/jwks.json"
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 4: MULTI-ISSUER CONFIGURATION (OR Logic)
+# Target: Allows validation from MULTIPLE Identity Providers on the same workload.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-multi-provider
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: multi-tenant-app
+  jwtRules:
+  # Provider 1: Internal SSO (Keycloak)
+  - issuer: "https://sso.company.com/realms/main"
+    jwksUri: "https://sso.company.com/realms/main/protocol/openid-connect/certs"
+  # Provider 2: External Partner (Auth0)
+  - issuer: "https://partner.us.auth0.com/"
+    jwksUri: "https://partner.us.auth0.com/.well-known/jwks.json"
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 5: HOW TO FORCE MANDATORY JWT (PAIRING WITH AuthorizationPolicy)
+# THIS IS 100% REQUIRED IF YOU WANT TO BLOCK ANONYMOUS REQUESTS!
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt-token
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: backend-api
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        # "*" means: Request MUST contain a VALID JWT from ANY issuer in RequestAuthentication
+        # You can also specify an exact principal: "https://sso.company.com/realms/production/sub-123"
+        requestPrincipals: ["*"]
+
+---
+# ==============================================================================
+# ICA EXAM QUICK REFERENCE SUMMARY / CHEAT SHEET
+# ==============================================================================
+# 1. Does RequestAuthentication reject requests without a JWT?
+#    NO! Missing JWT = Allowed through. Invalid JWT = 401 Unauthorized.
+#    To reject missing JWTs, use AuthorizationPolicy with 'requestPrincipals: ["*"]'.
+#
+# 2. Where are JWKS keys fetched and cached?
+#    Envoy sidecar fetches JWKS from 'jwksUri' and caches it in memory.
+#    Validation happens 100% LOCALLY inside Envoy — no call to IdP on every request!
+#
+# 3. Header Extraction Prefix Gotcha:
+#    'prefix: "Bearer "' -> MUST include the space after "Bearer".
+#
+# 4. Claim Forwarding:
+#    Use 'outputClaimToHeaders' to pass JWT claims (like user ID or roles)
+#    to backend apps without forcing backend apps to decode the JWT itself!
+# ==============================================================================

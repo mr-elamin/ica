@@ -1,0 +1,206 @@
+# ==============================================================================
+# ISTIO TELEMETRY (TEL) MASTER REFERENCE FOR ICA EXAM
+# File: istio/resources/05.telemetries.yaml
+#
+# PURPOSE:
+# Configures logging, metrics customization (tag/label overrides, disabling metrics),
+# and distributed tracing across the mesh, per namespace, or per workload.
+# ==============================================================================
+
+# ==============================================================================
+# 1. APPLICATION HIERARCHY & SCOPE (CRITICAL EXAM KNOWLEDGE)
+# ==============================================================================
+# A. MESH-WIDE LEVEL:
+#    - Apply to root namespace (typically `istio-system`).
+#    - Affects ALL workloads in the mesh unless overridden downstream.
+# B. NAMESPACE LEVEL:
+#    - Apply to a specific application namespace (e.g. `prod`).
+#    - Affects all workloads in that namespace without a workload selector.
+# C. WORKLOAD LEVEL:
+#    - Uses `selector.matchLabels` (or `targetRef` for K8s Gateway API).
+#    - Affects ONLY pods matching the labels within that namespace.
+#
+# RULE OF OVERRIDES:
+# Workload-level > Namespace-level > Mesh-level.
+# If both Namespace and Mesh define overrides for the SAME metric (e.g. REQUEST_COUNT),
+# the closer scope completely OVERWRITES (does not merge) the metric's tagOverrides.
+# ==============================================================================
+
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: exam-master-telemetry
+  namespace: istio-system        # <--- For Mesh-Wide, use istio-system. For NS/Workload, use app namespace.
+spec:
+
+  # ----------------------------------------------------------------------------
+  # A. WORKLOAD SELECTOR (Workload-Level Scope)
+  # ----------------------------------------------------------------------------
+  # Omit 'selector' for Mesh-Wide or Namespace-Wide policies!
+  # If specified, this Telemetry resource applies ONLY to matching workloads.
+  selector:
+    matchLabels:
+      app: payment-service
+
+  # ----------------------------------------------------------------------------
+  # B. METRICS CUSTOMIZATION (Prometheus Customization & Label Overrides)
+  # ----------------------------------------------------------------------------
+  metrics:
+    # 1. PROVIDERS: Where to send the metrics (e.g., prometheus)
+    - providers:
+        - name: prometheus
+
+      # Optional reporting interval (e.g. for batching metrics)
+      # reportingInterval: 5s
+
+      # 2. OVERRIDES: Tailor specific metrics or labels
+      # To create an override, we have to do the following:
+      # A. Specify the predefined istio-service level metric to override (e.g., REQUEST_COUNT, REQUEST_DURATION, etc.) or customMetric for non-standard service-level istio metrics (e.g., envoy_my_custom_wasm_metric).
+      # B. Specify the mode (CLIENT, SERVER, or CLIENT_AND_SERVER)
+      # C. Specify the tagOverrides (labels) to add, update, or remove.
+      overrides:
+
+        # --- EXAMPLE 1: Add a custom tag/label using CEL expression ---
+        - match:
+            # A.1 Select the metric to override (predefined)
+            # Enums: ALL_METRICS, REQUEST_COUNT, REQUEST_DURATION, REQUEST_SIZE,
+            #        RESPONSE_SIZE, TCP_OPENED_CONNECTIONS, TCP_CLOSED_CONNECTIONS,
+            #        TCP_SENT_BYTES, TCP_RECEIVED_BYTES, GRPC_REQUEST_MESSAGES, GRPC_RESPONSE_MESSAGES
+            metric: REQUEST_COUNT # This is the predefined prometheus `istio_requests_total` metric name (service-level metric)
+
+            # A.2 Alternative we could select our own custom non-standard metric (defined in a WASM plugin) instead of a predefined Istio service-level metric.
+            #  customMetric: "envoy_my_custom_wasm_metric"
+            
+            # B. specify the mode Enums: CLIENT_AND_SERVER (default), CLIENT (outbound), SERVER (inbound)
+            mode: SERVER
+          
+          # C. specify the tagOverrides (prometheus labels) to add, update, or remove.
+          tagOverrides:
+            # Key: Name of the Prometheus label to create or update
+            request_host: # Name of the Prometheus label to create or update
+              operation: UPSERT   # Options: UPSERT (add/update), REMOVE
+              value: "request.host"  # CEL expression (extracts HTTP Host header)
+            
+            destination_port: # Name of the Prometheus label to create or update
+              operation: UPSERT
+              value: "string(destination.port)" # CEL expression
+
+        # --- EXAMPLE 2: Remove a noisy tag/label to save Prometheus storage ---
+        - match:
+            metric: REQUEST_COUNT # This is the predefined prometheus `istio_requests_total` metric name (service-level metric)
+            mode: CLIENT_AND_SERVER
+          tagOverrides:
+            response_code:
+              operation: REMOVE   # Drops 'response_code' label from istio_requests_total
+
+        # --- EXAMPLE 3: Disable a metric entirely ---
+        - match:
+            metric: REQUEST_SIZE  # Disable 'istio_request_bytes'
+          disabled: true          # Set to true to stop emitting this metric
+
+        # --- EXAMPLE 4: Match custom non-standard metric (MUTUALLY EXCLUSIVE with 'metric') ---
+        # Note: Do NOT set both 'metric' and 'customMetric' in the same match block!
+        # - match:
+        #     customMetric: "envoy_my_custom_wasm_metric"
+        #   disabled: false
+
+  # ----------------------------------------------------------------------------
+  # C. ACCESS LOGGING (Envoy Access Logs Configuration)
+  # ----------------------------------------------------------------------------
+  # YES, you can configure multiple providers in a single accessLogging block!
+  # If you list multiple providers, access logs are emitted to ALL of them.
+  # ----------------------------------------------------------------------------
+  accessLogging:
+    # --- BLOCK 1: Standard stdout logging with a CEL filter ---
+    - providers:
+        - name: envoy              # Standard stdout/stderr logging
+        # - name: envoyfilelog     # Can also specify additional provider in same array!
+      
+      # Filter access logs using CEL expressions (e.g. log ONLY errors)
+      # Common CEL Variables: response.code, connection.mtls, request.url_path
+      filter:
+        expression: "response.code >= 400 || response.code == 0"
+
+    # --- BLOCK 2 (OPTIONAL): Separate provider block with a DIFFERENT filter ---
+    # Useful if you want ALL logs sent to a custom file/ALS, but ONLY errors sent to stdout!
+    - providers:
+        - name: envoyfilelog     # Configured under IstioOperator.spec.meshConfig.extensionProviders
+      filter:
+        expression: "true"       # Log 100% of traffic to file
+
+  # ----------------------------------------------------------------------------
+  # EXTENSION PROVIDERS EXPLANATION (How custom providers work)
+  # ----------------------------------------------------------------------------
+  # Custom log providers (file log, gRPC ALS, OpenTelemetry ALS) are defined
+  # globally in meshConfig / IstioOperator under 'extensionProviders':
+  #
+  # meshConfig:
+  #   extensionProviders:
+  #   - name: envoyfilelog        # Friendly name referenced in Telemetry resource
+  #     envoyFileAccessLog:
+  #       path: /var/log/mylog.txt
+  #       logFormat:
+  #         text: "%RESPONSE_CODE%:path=%REQ(:path)%"
+  # ----------------------------------------------------------------------------
+
+  # ----------------------------------------------------------------------------
+  # D. DISTRIBUTED TRACING (Jaeger / Zipkin / OpenTelemetry)
+  # ----------------------------------------------------------------------------
+  tracing:
+    - providers:
+        - name: zipkin             # Or opentelemetry, jaeger
+      
+      # Sampling rate percentage (0.0 to 100.0)
+      randomSamplingPercentage: 100.0
+
+      # Optional: Custom baggage/tags added to spans
+      customTags:
+        environment:
+          literal:
+            value: "production" # This will add a custom tag 'environment=production' to all spans
+        user_id:
+          header:
+            name: "X-User-ID"
+            defaultValue: "anonymous" # This will add a custom tag 'user_id' to all spans, extracted from the 'X-User-ID' header, or 'anonymous' if the header is missing.
+        python_version:
+          environment:
+            name: "PYTHON_VERSION" # This will add a custom tag 'python_version' to all spans, extracted from the environment variable 'PYTHON_VERSION'.
+
+# ==============================================================================
+# COMMON ICA EXAM TASK PATTERNS
+# ==============================================================================
+#
+# TASK 1: "Enable Envoy stdout Access Logs for all workloads in 'default' namespace, but ONLY for requests returning 5xx errors."
+# Solution:
+#   apiVersion: telemetry.istio.io/v1
+#   kind: Telemetry
+#   metadata:
+#     name: log-5xx
+#     namespace: default
+#   spec:
+#     accessLogging:
+#       - providers: [{name: envoy}]
+#         filter:
+#           expression: "response.code >= 500"
+#
+# TASK 2: "Add 'request_path' label to istio_requests_total for the 'frontend' workload."
+# Solution:
+#   apiVersion: telemetry.istio.io/v1
+#   kind: Telemetry
+#   metadata:
+#     name: add-path-label
+#     namespace: default
+#   spec:
+#     selector:
+#       matchLabels:
+#         app: frontend
+#     metrics:
+#       - providers: [{name: prometheus}]
+#         overrides:
+#           - match:
+#               metric: REQUEST_COUNT
+#             tagOverrides:
+#               request_path:
+#                 operation: UPSERT
+#                 value: "request.path"
+# ==============================================================================

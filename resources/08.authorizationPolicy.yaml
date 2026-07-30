@@ -1,0 +1,264 @@
+# ==============================================================================
+# ISTIO MASTERY: AuthorizationPolicy Reference Guide (ICA Exam Ready)
+# API Group: security.istio.io/v1
+# Kind: AuthorizationPolicy
+# ==============================================================================
+#
+# KEY CONCEPT:
+# AuthorizationPolicy enforces ACCESS CONTROL (RBAC) on workloads in the mesh.
+# It controls WHO (from) can perform WHAT (to) under WHICH CONDITIONS (when).
+#
+# ⚠️ THE 4 EVALUATION ACTIONS (EVALUATION ORDER IS CRITICAL FOR EXAM!):
+# Istio evaluates policies in a strict fixed order:
+#   1. CUSTOM  (Evaluated FIRST: delegates decision to external authz like OPA)
+#   2. DENY    (Evaluated SECOND: if any DENY policy matches, request is REJECTED immediately)
+#   3. ALLOW   (Evaluated THIRD: if any ALLOW policy exists, request MUST match at least one ALLOW)
+#   4. AUDIT   (Evaluated LAST: logs the decision but never rejects/blocks traffic)
+#
+# ------------------------------------------------------------------------------
+# ⚠️ THE "EMPTY RULES", "ABSENCE OF RULES", AND "EMPTY SELECTOR" EXAM TRAPS:
+# ------------------------------------------------------------------------------
+# 1. ABSENCE OF SELECTOR (or 'selector: {}'):
+#    Applies the policy to ALL workloads in the namespace 
+#    (or mesh-wide if created in 'istio-system').
+#
+# 2. ACTION: ALLOW with EMPTY/ABSENT 'rules' (e.g. action: ALLOW, rules: []):
+#    Denies EVERYTHING! An ALLOW policy with no matching rules matches nothing,
+#    which triggers Istio's "Default Deny" behavior for that workload.
+#
+# 3. ACTION: ALLOW with ONE EMPTY RULE (e.g. action: ALLOW, rules: [{}]):
+#    Allows EVERYTHING! An empty rule `{}` inside rules matches ANY request!
+#
+# 4. ACTION: DENY with ONE EMPTY RULE (e.g. action: DENY, rules: [{}]):
+#    Denies EVERYTHING! An empty rule `{}` under DENY matches all traffic.
+#
+# 5. ABSENCE OF 'action':
+#    Defaults to ALLOW.
+#
+# 6. MATCHING LOGIC INSIDE RULES:
+#    - Multiple items in 'rules': OR logic (Match Rule 1 OR Rule 2)
+#    - Multiple items in 'from': OR logic (Match Source 1 OR Source 2)
+#    - Multiple items in 'to': OR logic (Match Operation 1 OR Operation 2)
+#    - Multiple items in 'when': AND logic (MUST match Condition 1 AND Condition 2!)
+#    - Combination of 'from' + 'to' + 'when' in ONE rule: AND logic 
+#      (MUST match 'from' AND 'to' AND 'when' simultaneously!)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# SECTION 1: "DENY ALL" DEFAULT SECURITY BASELINE (Namespace or Mesh level)
+# Use Case: Best Practice - start with zero trust, then selectively add ALLOW rules.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all-by-default
+  namespace: prod              # In 'prod' ns (or 'istio-system' for mesh-wide)
+spec:
+  # Absence of 'selector' = matches ALL workloads in namespace 'prod'
+  action: ALLOW
+  rules: []                     # Empty list = matches NOTHING -> DENIES ALL TRAFFIC! # Empty list = is the same as "no rules defined at all" = DENY ALL TRAFFIC!
+
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 2: "ALLOW ALL" POLICY
+# Target: All workloads in namespace 'test'.
+# Use Case: Disabling RBAC enforcement in a dev/test environment.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-all-test
+  namespace: test
+spec:
+  action: ALLOW
+  rules:
+  - {}                          # Single empty rule = matches EVERYTHING -> ALLOW ALL!
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 3: DETAILED ALLOW POLICY (from + to + when)
+# Target: Pods matching 'app: backend-api' in 'prod' namespace.
+# Use Case: Granular mTLS identity + HTTP path/method + JWT claim authorization.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: backend-api          # Pod selector
+  action: ALLOW                 # Default if action is omitted
+  rules:
+  - from:                       # WHO is calling (L4 / L7 identity)
+    - source:
+        # mTLS / X.509 certificate identity (SPIFFE ID) from the client workload certificate:
+        principals: ["cluster.local/ns/prod/sa/frontend-service-account"]
+        
+        # Also derived from the mTLS certificate identity, usually the ServiceAccount portion of the SPIFFE ID:
+        serviceAccounts: ["frontend-service-account"]
+        
+        # JWT-based identity from a validated JWT (typically built as <issuer>/<subject> using iss + sub):
+        # Example: if JWT has iss="https://sso.company.com/realms/production" and sub="user-123",
+        # the request principal becomes: "https://sso.company.com/realms/production/user-123"
+        requestPrincipals: ["https://sso.company.com/realms/production/*"]
+        
+        # Kubernetes namespace metadata of the source workload, not from the JWT or certificate:
+        namespaces: ["prod", "ingress-gateways"]
+        
+        # Source IP/CIDR from the TCP connection, not from the JWT or certificate:
+        ipBlocks: ["10.244.0.0/16", "192.168.1.100/32"]
+        
+        # Remote client IP (often from X-Forwarded-For or trusted proxy headers), not from JWT or certificate:
+        remoteIpBlocks: ["1.2.3.4/32"]
+        
+        # Trust domain from the mTLS certificate identity (the cluster.local part of the SPIFFE ID):
+        trustDomains: ["cluster.local"]
+        
+    to:                         # WHAT operation is requested (L7 HTTP / L4 Port)
+    - operation:
+        methods: ["GET", "POST"] # HTTP Methods
+        paths: ["/api/v1/orders/*", "/healthz"] # HTTP Paths (supports '*' wildcard)
+        ports: ["8080", "9090"] # Port numbers (as strings!)
+        hosts: ["api.company.com", "*.internal.net"] # HTTP Host header
+        
+    when:                       # WHICH conditions must be met (Istio Attributes - AND logic)
+    - key: request.auth.claims[role] # Check claim 'role' in verified JWT
+      values: ["admin", "editor"]
+    - key: request.headers[x-custom-header]
+      values: ["trusted-client"]
+    - key: source.ip
+      notValues: ["10.0.0.66"]  # Condition negation
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 4: DENY POLICY WITH NEGATION (notPrincipals / notPaths)
+# Target: Pods matching 'app: admin-dashboard'.
+# Use Case: Explicitly block dangerous paths or untrusted sources (DENY overrides ALLOW).
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-unauthorized-admin-access
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: admin-dashboard
+  action: DENY                  # Rejects matching requests immediately with 403 Forbidden!
+  rules:
+  - from:
+    - source:
+        # NEGATION: Deny requests from ANY source EXCEPT the admin service account
+        notPrincipals: ["cluster.local/ns/prod/sa/admin-sa"]
+        notNamespaces: ["kube-system"]
+    to:
+    - operation:
+        paths: ["/admin/*", "/debug/*"]
+        notMethods: ["GET"]      # Deny all methods EXCEPT GET (e.g. block POST/DELETE)
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 5: CUSTOM ACTION (OPA / External Authorizer Integration)
+# Target: Ingress Gateway or sensitive API workloads.
+# Use Case: Delegate complex authorization logic to Open Policy Agent (OPA) or OAuth2-Proxy.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: delegate-to-opa
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+  action: CUSTOM                # Delegates decision to an external extension provider
+  provider:
+    name: "opa-ext-authz"       # MUST match extensionProvider name defined in MeshConfig/IstioOperator
+  rules:
+  - to:
+    - operation:
+        paths: ["/secure-api/*"]
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 6: AUDIT ACTION (Dry-Run / Logging Mode)
+# Target: Workloads in 'prod'.
+# Use Case: Test a new policy in production without blocking real user traffic.
+# ------------------------------------------------------------------------------
+# ALLOW:
+# If the request matches a rule, it is permitted.
+# If it does not match any allow rule, it is denied by default for that workload.
+
+# AUDIT:
+# If the request matches a rule, it is logged.
+# If it does not match, it is treated as “no policy hit” and the request continues normally.
+# It does not enforce a deny-by-default behavior.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: audit-suspicious-access
+  namespace: prod
+spec:
+  selector:
+    matchLabels:
+      app: payment-service
+  action: AUDIT                 # Logs access violation to access logs/stdout, but ALLOWS traffic!
+  rules:
+  - from:
+    - source:
+        notNamespaces: ["prod"] # Audit any cross-namespace calls to payment-service
+
+---
+# ------------------------------------------------------------------------------
+# SECTION 7: GATEWAY API TARGETING (targetRef & targetRefs)
+# Target: Kubernetes Gateway API resources.
+# ------------------------------------------------------------------------------
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: authz-gateway-api
+  namespace: istio-system
+spec:
+  targetRef:
+    group: "gateway.networking.k8s.io"
+    kind: "Gateway"
+    name: "public-gateway"
+    namespace: "istio-system"
+  action: ALLOW
+  rules:
+  - to:
+    - operation:
+        methods: ["GET"]
+
+---
+# ==============================================================================
+# ICA EXAM QUICK REFERENCE SUMMARY / CHEAT SHEET
+# ==============================================================================
+# 1. EVALUATION ORDER (Memorize this sequence!):
+#    CUSTOM -> DENY -> ALLOW -> AUDIT
+#    - If ANY DENY matches -> 403 Forbidden.
+#    - If ALLOW policies exist for a workload, but request matches NONE -> 403 Forbidden.
+#
+# 2. EMPTY RULES MATRIX (HIGH PROBABILITY EXAM QUESTION):
+#    +--------------------------+-----------------------+
+#    | Manifest Syntax          | Action Result         |
+#    +--------------------------+-----------------------+
+#    | action: ALLOW, rules: [] | DENIES EVERYTHING!    |
+#    | action: ALLOW, rules: [{}]| ALLOWS EVERYTHING!   |
+#    | action: DENY,  rules: [{}]| DENIES EVERYTHING!    |
+#    +--------------------------+-----------------------+
+#
+# 3. Principals vs RequestPrincipals (The Difference):
+#    - 'principals' / 'serviceAccounts' = mTLS Workload Identity (Layer 4 SPIFFE ID).
+#    - 'requestPrincipals' = End-User JWT Identity (Layer 7 from RequestAuthentication).
+#
+# 4. Logical Operators:
+#    - Multiple `rules` = OR
+#    - Multiple `from` / `to` = OR
+#    - Multiple `when` = AND
+#    - `from` + `to` + `when` combined in 1 rule = AND
+# ==============================================================================
